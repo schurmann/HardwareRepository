@@ -112,7 +112,7 @@ class BIOMAXMD3(GenericDiffractometer):
                        'not defined. Continuing with the middle: %s" % self.zoom_centre)
             else:
                 logging.getLogger("HWR").warning("Diffractometer: Neither zoom centre nor camera size are defined")
-      
+
     def current_phase_changed(self, current_phase):
         """
         Descript. :
@@ -120,7 +120,7 @@ class BIOMAXMD3(GenericDiffractometer):
         self.current_phase = current_phase
         logging.getLogger("HWR").info("MD3 phase changed to %s" % current_phase)
         self.emit('phaseChanged', (current_phase, ))
- 
+
     def start3ClickCentring(self):
         self.start_centring_method(self.CENTRING_METHOD_MANUAL)
 
@@ -345,7 +345,7 @@ class BIOMAXMD3(GenericDiffractometer):
         scan(scan_params)
         logging.getLogger("HWR").info("[BIOMAXMD3] MD3 oscillation launched, waiting for device ready.")
         #if wait:
-        time.sleep(0.1) 
+        time.sleep(0.1)
         self.wait_device_ready(exptime+30)  # timeout of 5 min
         logging.getLogger("HWR").info("[BIOMAXMD3] MD3 oscillation, device ready.")
 
@@ -372,7 +372,7 @@ class BIOMAXMD3(GenericDiffractometer):
 
         logging.getLogger("HWR").info("[BIOMAXMD3] MD3 helical oscillation requested, waiting device ready..., params "+str(scan_params))
         scan = self.command_dict["startScan4DEx"]
-        time.sleep(0.1) 
+        time.sleep(0.1)
         logging.getLogger("HWR").info("[BIOMAXMD3] MD3 helical oscillation requested, device ready.")
         scan(scan_params)
         self.wait_device_ready(exptime+30)
@@ -440,7 +440,7 @@ class BIOMAXMD3(GenericDiffractometer):
         #Probably not needed
         #if current_phase == "Centring" and new_phase == "DataCollection":
         #    return True
-           
+
         return False
 
     def set_phase(self, phase, wait=False, timeout=None):
@@ -503,6 +503,21 @@ class BIOMAXMD3(GenericDiffractometer):
             self.phiy_motor_hwobj.moveRelative(-1*(y-beam_yc)/float(self.pixelsPerMmZ))
             self.cent_vertical_pseudo_motor.setValue(cent_vertical_to_move)
             self.wait_device_ready(5)
+
+            print "........ moveto beam"
+            curr_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.centring_status["endTime"] = curr_time
+
+            motor_pos = self.current_motor_positions
+            self.centring_status["motors"] = self.convert_from_obj_to_name(motor_pos)
+            self.centring_status["method"] = "2D"
+            self.centring_status["valid"] = True
+            method = "2D"
+            self.centring_status["valid"] = True
+            self.emit('centringAccepted', (True, self.get_centring_status()))
+            self.emit('centringSuccessful', (method, self.get_centring_status()))
+            self.current_centring_method = None
+            self.current_centring_procedure = None
         except:
             logging.getLogger("HWR").exception("MD3: could not move to beam.")
 
