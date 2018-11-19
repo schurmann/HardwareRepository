@@ -451,6 +451,7 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             raise Exception("data collection hook failed... ", sys.exc_info()[0])
 
     def take_timed_snapshots(self):
+        import json
         logging.getLogger("HWR").info("[BIOMAXCOLLECT] [TSS] take timed snapshots launched")
         logging.getLogger("HWR").debug(
             "[BIOMAXCOLLECT] [TSS] current_dc_parameters: %s" % self.current_dc_parameters)
@@ -465,6 +466,14 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] starting loop")
         num_imgs = 0
         logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] saving snapshots into %s" % self.snapshot_dir)
+        metaname = '%s_%s.meta.txt' % (
+            self.current_dc_parameters['fileinfo']['prefix'],
+            self.current_dc_parameters['fileinfo']['run_number']
+            )
+        metapath = os.path.join(self.snapshot_dir, metaname)
+        with open(metapath, 'w') as metafile:
+            logging.getLogger("HWR").debug('[BIOMAXCOLLECT] [TSS] saving metafile')
+            metafile.write(json.dumps(self.current_dc_parameters))
         while self._collecting:
             filename = "%s_%s_%s.timesnapshot.jpeg" % (
                 self.current_dc_parameters["fileinfo"]["prefix"],
