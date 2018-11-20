@@ -19,7 +19,6 @@ import math
 import requests
 import uuid
 import json
-import datetime
 
 from HardwareRepository.TaskUtils import *
 from HardwareRepository.BaseHardwareObjects import HardwareObject
@@ -63,7 +62,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         self.datacatalog_enabled = True
         self.datacatalog_url = None
         self.collection_uuid = ""
-        self.snapshot_dir = None
 
     def init(self):
         """
@@ -72,7 +70,7 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         self.ready_event = gevent.event.Event()
         self.diffractometer_hwobj = self.getObjectByRole("diffractometer")
         self.lims_client_hwobj = self.getObjectByRole("lims_client")
-        self.machine_info_hwobj = self.getObjectByRole("machine_info")
+        self.machine_info_hwobj = self.getObjectByRole("mach_info")
         self.energy_hwobj = self.getObjectByRole("energy")
         self.resolution_hwobj = self.getObjectByRole("resolution")
         self.detector_hwobj = self.getObjectByRole("detector")
@@ -86,26 +84,17 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         self.session_hwobj = self.getObjectByRole("session")
         self.datacatalog_url = self.getProperty("datacatalog_url", None)
         self.datacatalog_enabled = self.getProperty("datacatalog_enabled", True)
-        self.shape_history_hwobj = self.getObjectByRole("shape_history")
+        self.finished = False
 
         if self.datacatalog_enabled:
             logging.getLogger("HWR").info("[COLLECT] Datacatalog enabled, url: %s" % self.datacatalog_url)
         else:
             logging.getLogger("HWR").warning("[COLLECT] Datacatalog not enabled")
 
-            self.safety_shutter_hwobj = self.getObjectByRole("safety_shutter")
-
+        self.safety_shutter_hwobj = self.getObjectByRole("safety_shutter")
         # todo
         # self.fast_shutter_hwobj = self.getObjectByRole("fast_shutter")
         # self.cryo_stream_hwobj = self.getObjectByRole("cryo_stream")
-
-        undulators = []
-        # todo
-        try:
-            for undulator in self["undulators"]:
-                undulators.append(undulator)
-        except:
-            pass
 
         self.exp_type_dict = {'Mesh': 'Mesh', 'Helical': 'Helical'}
         try:
@@ -124,57 +113,37 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             logging.getLogger("HWR").error("[HWR] *** Detector Y pixel size not available, set to 7-5e5")
             pix_y = 7.5e-5
 
-            self.set_beamline_configuration(
-                synchrotron_name="MAXIV",
-                directory_prefix=self.getProperty("directory_prefix"),
-                default_exposure_time=self.getProperty("default_exposure_time"),
-                minimum_exposure_time=min_exp,
-                detector_fileext=self.detector_hwobj.getProperty("file_suffix"),
-                detector_type=self.detector_hwobj.getProperty("type"),
-                detector_manufacturer=self.detector_hwobj.getProperty("manufacturer"),
-                detector_model=self.detector_hwobj.getProperty("model"),
-                detector_px=pix_x,
-                detector_py=pix_y,
-                undulators=undulators,
-                focusing_optic=self.getProperty('focusing_optic'),
-                monochromator_type=self.getProperty('monochromator'),
-                beam_divergence_vertical=self.beam_info_hwobj.get_beam_divergence_hor(),
-                beam_divergence_horizontal=self.beam_info_hwobj.get_beam_divergence_ver(),
-                polarisation=self.getProperty('polarisation'),
-                input_files_server=self.getProperty("input_files_server"))
+        self.set_beamline_configuration(
+            synchrotron_name="MAXIV",
+            directory_prefix=self.getProperty("directory_prefix"),
+            default_exposure_time=self.getProperty("default_exposure_time"),
+            minimum_exposure_time=min_exp,
+            detector_fileext=self.detector_hwobj.getProperty("file_suffix"),
+            detector_type=self.detector_hwobj.getProperty("type"),
+            detector_manufacturer=self.detector_hwobj.getProperty("manufacturer"),
+            detector_model=self.detector_hwobj.getProperty("model"),
+            detector_px=pix_x,
+            detector_py=pix_y,
+            undulators=self.getProperty('undulator'),
+            focusing_optic=self.getProperty('focusing_optic'),
+            monochromator_type=self.getProperty('monochromator'),
+            beam_divergence_vertical=self.beam_info_hwobj.get_beam_divergence_hor(),
+            beam_divergence_horizontal=self.beam_info_hwobj.get_beam_divergence_ver(),
+            polarisation=self.getProperty('polarisation'),
+            input_files_server=self.getProperty("input_files_server"))
+
+        self.addChannel({"type": "tango",
+                         "name": 'undulator_gap',
+                         "tangoname": self.getProperty('undulator_gap'),
+                         "timeout": 10000,
+                         },
+                        'Position'
+                        )
 
         """ to add """
-        # self.chan_undulator_gap = self.getChannelObject('UndulatorGap')
         # self.chan_machine_current = self.getChannelObject("MachineCurrent")
 
         self.emit("collectReady", (True,))
-
-    def move_to_center_position(self):
-        """
-        Descript. :
-        """
-        logging.getLogger("HWR").info("[COLLECT] Moving to center position")
-        shape_id = self.get_current_shape_id()
-        shape = self.shape_history_hwobj.get_shape(shape_id).as_dict()
-
-        x = shape.get('screen_coord')[0]
-        y = shape.get('screen_coord')[1]
-        x_ppmm = shape.get('pixels_per_mm')[0] / 1000
-        y_ppmm = shape.get('pixels_per_mm')[1] / 1000
-
-        cell_width = shape.get('cell_width')
-        cell_height = shape.get('cell_height')
-
-        num_cols = shape.get('num_cols') / 2
-        num_rows = shape.get('num_rows') / 2
-
-        x_cor = x + cell_width * x_ppmm * (num_cols - 1) + cell_width * x_ppmm / 2
-        y_cor = y + cell_height * y_ppmm * (num_rows - 1) + cell_height * y_ppmm / 2
-        center_positions = self.diffractometer_hwobj.get_centred_point_from_coord(x_cor, y_cor, return_by_names=True)
-        center_positions.pop('zoom')
-        center_positions.pop('beam_x')
-        center_positions.pop('beam_y')
-        self.move_motors(center_positions)
 
     # ---------------------------------------------------------
     # refactor do_collect
@@ -208,9 +177,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
 
             log.info("Collection: Creating directories for raw images and processing files")
             self.create_file_directories()
-
-            log.info("[TSS]: Creating directories for snapshots")
-            self.create_snapshot_directory()
 
             log.info("Collection: Getting sample info from parameters")
             self.get_sample_info()
@@ -331,7 +297,8 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
 
         self.triggers_to_collect = self.prepare_triggers_to_collect()
 
-        log.info("Collection: Updating data collection in LIMS")
+        logging.getLogger("HWR").info(
+            "Collection: Updating data collection in LIMS with data: %s" % self.current_dc_parameters)
         self.update_data_collection_in_lims()
 
         # Generate and set a unique id, used in the data catalog and the detector must know it
@@ -359,10 +326,8 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         if self.diffractometer_hwobj.get_current_phase() != "DataCollection":
             log.info("Moving Diffractometer to Data Collection")
             self.diffractometer_hwobj.set_phase("DataCollection", wait=True, timeout=200)
-        if self.current_dc_parameters.get('experiment_type', 'Unknown').lower() == 'mesh':
-            self.move_to_center_position()
-        else:
-            self.move_to_centered_position()
+
+        self.move_to_centered_position()
 
     # -------------------------------------------------------------------------------
 
@@ -382,10 +347,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             for trigger_num in range(1, ntriggers + 1):
                 triggers_to_collect.append((osc_start, trigger_num, nframes_per_trigger, osc_range))
                 osc_start += osc_range * nframes_per_trigger - overlap
-        elif self.current_dc_parameters['experiment_type'] == 'Mesh':
-            logging.getLogger("HWR").info("osc_start %s, nframes %s, osc_range %s num_lines %s" % (
-                osc_start, nframes, osc_range, self.get_mesh_num_lines()))
-            triggers_to_collect.append((osc_start, self.get_mesh_num_lines(), nframes, osc_range))
         else:
             triggers_to_collect.append((osc_start, 1, nframes, osc_range))
 
@@ -424,23 +385,26 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             # wait until detector is ready (will raise timeout RuntimeError), sometimes arm command
             # is accepted by the detector but without any effect at all... sad...
             # self.detector_hwobj.wait_ready()
+            logging.getLogger('HWR').debug('[TSS] Number triggers %s' % len(self.triggers_to_collect))
             for (osc_start, trigger_num, nframes_per_trigger, osc_range) in self.triggers_to_collect:
+                self.finished = False
+                logging.getLogger('HWR').debug('[TSS] Here is a trigger %s' % trigger_num)
                 osc_end = osc_start + osc_range * nframes_per_trigger
-            self.display_task = gevent.spawn(self._update_image_to_display)
-            self.progress_task = gevent.spawn(self._update_task_progress)
-            self.timed_snapshot_task = gevent.spawn(self.take_timed_snapshots)
-            self.oscillation_task = self.oscil(osc_start, osc_end, shutterless_exptime, 1, wait=True)
-
+                self.display_task = gevent.spawn(self._update_image_to_display)
+                self.progress_task = gevent.spawn(self._update_task_progress)
+                self.timed_snapshot_task = gevent.spawn(self.take_timed_snapshots)
+                self.oscillation_task = self.oscil(osc_start, osc_end, shutterless_exptime, 1, wait=True)
             try:
                 self.detector_hwobj.stop_acquisition()
+                self.finished = True
             except Exception as ex:
                 logging.getLogger("HWR").error("[COLLECT] Detector error stopping acquisition: %s" % ex)
 
-                # not closing the safety shutter here, but in prepare_beamline
-                # to avoid extra open/closes
-                # self.close_safety_shutter()
-                self.close_detector_cover()
-                self.emit("collectImageTaken", oscillation_parameters['number_of_images'])
+            # not closing the safety shutter here, but in prepare_beamline
+            # to avoid extra open/closes
+            # self.close_safety_shutter()
+            self.close_detector_cover()
+            self.emit("collectImageTaken", oscillation_parameters['number_of_images'])
         except RuntimeError as ex:
             self.data_collection_cleanup()
             logging.getLogger("HWR").error("[COLLECT] Runtime Error: %s" % ex)
@@ -450,43 +414,18 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             logging.getLogger("HWR").error("Unexpected error:", sys.exc_info()[0])
             raise Exception("data collection hook failed... ", sys.exc_info()[0])
 
-    def take_timed_snapshots(self):
-        import json
-        logging.getLogger("HWR").info("[BIOMAXCOLLECT] [TSS] take timed snapshots launched")
-        logging.getLogger("HWR").debug(
-            "[BIOMAXCOLLECT] [TSS] current_dc_parameters: %s" % self.current_dc_parameters)
+    def save_image(self):
+        img_dir = os.path.join(self.current_dc_parameters["fileinfo"]["directory"], "timed_snapshots")
+        if not os.path.exists(img_dir):
+            try:
+                self.create_directories(img_dir)
+            except:
+                logging.getLogger("HWR").exception("Collection: Error creating timed snapshot directory")
 
-        # find number of images
-        num_images = self.current_dc_parameters['oscillation_sequence'][0]['number_of_images']
-
-        # find end timestamp
-        exp_time = self.current_dc_parameters['oscillation_sequence'][0]['exposure_time']
-
-        # take as many images as we can and timestamp them
-        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] starting loop")
-        num_imgs = 0
-        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] saving snapshots into %s" % self.snapshot_dir)
-        metaname = '%s_%s.meta.txt' % (
-            self.current_dc_parameters['fileinfo']['prefix'],
-            self.current_dc_parameters['fileinfo']['run_number']
-            )
-        metapath = os.path.join(self.snapshot_dir, metaname)
-        with open(metapath, 'w') as metafile:
-            logging.getLogger("HWR").debug('[BIOMAXCOLLECT] [TSS] saving metafile')
-            metafile.write(json.dumps(self.current_dc_parameters))
-        while self._collecting:
-            filename = "%s_%s_%s.timesnapshot.jpeg" % (
-                self.current_dc_parameters["fileinfo"]["prefix"],
-                self.current_dc_parameters["fileinfo"]["run_number"],
-                datetime.datetime.now().strftime('%T.%f')
-            )
-            shot_filename = os.path.join(self.snapshot_dir, filename)
-            logging.getLogger("HWR").info("[BIOMAXCOLLECT] [TSS] saving new snapshot: %s" % filename)
-            self.diffractometer_hwobj.camera_hwobj.save_snapshot(shot_filename)
-            num_imgs += 1
-            time.sleep(exp_time)
-
-        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] finished taking %d timed snapshots" % num_imgs)
+        shot_filename = os.path.join(img_dir, "%s_%s_%s.timesnapshot.jpeg" % (
+        self.current_dc_parameters["fileinfo"]["prefix"], self.current_dc_parameters["fileinfo"]["run_number"],
+        time.strftime('%T')))
+        self.diffractometer_hwobj.camera_hwobj.save_snapshot(shot_filename)
 
     def get_mesh_num_lines(self):
         return self.mesh_num_lines
@@ -508,20 +447,13 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         elif self.current_dc_parameters['experiment_type'] == 'Mesh':
             mesh_range = oscillation_parameters['mesh_range']
             # self.diffractometer_hwobj.raster_scan(20, 22, 10, 0.2, 0.2, 10, 10)
-            logging.getLogger("HWR").info("Mesh oscillation requested: number of lines %s" % self.get_mesh_num_lines())
-            logging.getLogger("HWR").info(
-                "Mesh oscillation requested: total number of frames %s" % self.get_mesh_total_nb_frames())
-            shape_id = self.get_current_shape_id()
-            shape = self.shape_history_hwobj.get_shape(shape_id).as_dict()
-            range_x = shape.get('num_cols') * shape.get('cell_width') / 1000.0
-            range_y = shape.get('num_rows') * shape.get('cell_height') / 1000.0
             self.diffractometer_hwobj.raster_scan(start,
                                                   end,
                                                   exptime * self.get_mesh_num_lines(),
-                                                  range_y,  # vertical_range in mm,
-                                                  range_x,  # horizontal_range in mm,
+                                                  mesh_range[1] / 1000,  # vertical_range in mm,
+                                                  mesh_range[0] / 1000,  # horizontal_range in mm,
                                                   self.get_mesh_num_lines(),
-                                                  self.get_mesh_total_nb_frames(),  # is in fact nframes per line
+                                                  self.get_mesh_total_nb_frames(),  # nframes,
                                                   invert_direction=1,
                                                   wait=True)
         else:
@@ -530,12 +462,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
     def _update_task_progress(self):
         logging.getLogger("HWR").info("[BIOMAXCOLLECT] update task progress launched")
         num_images = self.current_dc_parameters['oscillation_sequence'][0]['number_of_images']
-        if self.current_dc_parameters.get('experiment_type') == 'Mesh':
-            shape_id = self.get_current_shape_id()
-            shape = self.shape_history_hwobj.get_shape(shape_id).as_dict()
-            num_cols = shape.get('num_cols')
-            num_rows = shape.get('num_rows')
-            num_images = num_cols * num_rows
         num_steps = 10.0
         if num_images < num_steps:
             step_size = 1
@@ -550,10 +476,56 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             time.sleep(exp_time * step_size)
             current_frame += step_size
             logging.getLogger("HWR").info("[BIOMAXCOLLECT] collectImageTaken %s (%s, %s, %s)" % (
-                current_frame, num_images, step_size, step_count))
-            self.emit("collectImageTaken",
-                      current_frame / self.current_dc_parameters['oscillation_sequence'][0]['number_of_images'])
+            current_frame, num_images, step_size, step_count))
+            self.emit("collectImageTaken", current_frame)
             step_count += 1
+
+    def take_timed_snapshots(self):
+        logging.getLogger("HWR").info("[BIOMAXCOLLECT] [TSS] take timed snapshots launched")
+        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] current_dc_parameters: %s" % self.current_dc_parameters)
+
+        # ensure the existence of image directory
+        img_dir = os.path.join(self.current_dc_parameters["fileinfo"]["directory"], "timed_snapshots")
+        if not os.path.exists(img_dir):
+            try:
+                self.create_directories(img_dir)
+            except:
+                logging.getLogger("HWR").exception("Collection: Error creating timed snapshot directory")
+
+        # find number of images
+
+        # find end timestamp
+        exp_time = self.current_dc_parameters['oscillation_sequence'][0]['exposure_time']
+
+        # take as many images as we can and timestamp them
+        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] starting loop")
+        metaname = '%s_%s_%s.meta.txt' % (
+            self.current_dc_parameters['fileinfo']['prefix'],
+            self.current_dc_parameters['fileinfo']['run_number'],
+            time.time()
+        )
+        self.current_dc_parameters['zoom1'] = self.diffractometer_hwobj.zoom_motor_hwobj._last_position_name
+        self.current_dc_parameters['backlight'] = self.diffractometer_hwobj.back_light.getPosition()
+        metapath = os.path.join(img_dir, metaname)
+        with open(metapath, 'w') as metafile:
+            logging.getLogger("HWR").debug('[BIOMAXCOLLECT] [TSS] saving metafile')
+            metafile.write(json.dumps(self.current_dc_parameters))
+
+        num_imgs = 0
+        while self._collecting:
+            shot_filename = os.path.join(
+                img_dir,
+                "%s_%s_%s.jpeg" % (
+                    self.current_dc_parameters["fileinfo"]["prefix"],
+                    self.current_dc_parameters["fileinfo"]["run_number"],
+                    time.time()
+                )
+            )
+            logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] saving snapshot into %s" % img_dir)
+            self.diffractometer_hwobj.camera_hwobj.save_snapshot(shot_filename)
+            num_imgs += 1
+            time.sleep(exp_time / 1000)
+        logging.getLogger("HWR").debug("[BIOMAXCOLLECT] [TSS] finished taking %d timed snapshots" % num_imgs)
 
     def emit_collection_failed(self):
         """
@@ -578,11 +550,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         """
         Descript. :
         """
-        if self.current_dc_parameters['experiment_type'] == 'Mesh':
-            # disable stream interface
-            # stop spot finding
-            self.detector_hwobj.disable_stream()
-            self.stop_spot_finder()
         success_msg = "Data collection successful"
         self.current_dc_parameters["status"] = success_msg
         self.emit("collectOscillationFinished", (self.owner, True,
@@ -598,45 +565,43 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
 
         logging.getLogger("HWR").debug(
             "[COLLECT] COLLECTION FINISHED, self.current_dc_parameters: %s" % self.current_dc_parameters)
+        try:
+            logging.getLogger("HWR").info("[BIOMAXCOLLECT] Going to generate XDS input files")
+            # generate XDS.INP only in raw/process
+            data_path = self.current_dc_parameters['fileinfo']['filename']
+            logging.getLogger("HWR").info("[BIOMAXCOLLECT] DATA file: %s" % data_path)
+            logging.getLogger("HWR").info("[BIOMAXCOLLECT] XDS file: %s" % self.current_dc_parameters["xds_dir"])
+            # Wait for the master file
+            self.wait_for_file_copied(data_path)
+            os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/generate_xds_inp.sh %s &" \
+                      % (self.current_dc_parameters["xds_dir"], data_path))
+            logging.getLogger("HWR").info("[BIOMAXCOLLECT] AUTO file: %s" % self.current_dc_parameters["auto_dir"])
+            os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/generate_xds_inp_auto.sh %s &" \
+                      % (self.current_dc_parameters["auto_dir"], data_path))
+            if (self.current_dc_parameters['experiment_type'] in ('OSC', 'Helical') and
+                    self.current_dc_parameters['oscillation_sequence'][0]['overlap'] == 0 and
+                    self.current_dc_parameters['oscillation_sequence'][0]['number_of_images'] >= \
+                    self.NIMAGES_TRIGGER_AUTO_PROC):
+                self.trigger_auto_processing("after", self.current_dc_parameters, 0)
+        except Exception as ex:
+            logging.getLogger("HWR").error("[COLLECT] Error creating XDS files, %s" % ex)
 
-        if self.current_dc_parameters.get('experiment_type') != 'Mesh':
-            try:
-                logging.getLogger("HWR").info("[BIOMAXCOLLECT] Going to generate XDS input files")
-                # generate XDS.INP only in raw/process
-                data_path = self.current_dc_parameters['fileinfo']['filename']
-                logging.getLogger("HWR").info("[BIOMAXCOLLECT] DATA file: %s" % data_path)
-                logging.getLogger("HWR").info("[BIOMAXCOLLECT] XDS file: %s" % self.current_dc_parameters["xds_dir"])
-                # Wait for the master file
-                self.wait_for_file_copied(data_path)
-                os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/generate_xds_inp.sh %s &" \
-                          % (self.current_dc_parameters["xds_dir"], data_path))
-                logging.getLogger("HWR").info("[BIOMAXCOLLECT] AUTO file: %s" % self.current_dc_parameters["auto_dir"])
-                os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/generate_xds_inp_auto.sh %s &" \
-                          % (self.current_dc_parameters["auto_dir"], data_path))
-                if (self.current_dc_parameters['experiment_type'] in ('OSC', 'Helical') and
-                        self.current_dc_parameters['oscillation_sequence'][0]['overlap'] == 0 and
-                        self.current_dc_parameters['oscillation_sequence'][0]['number_of_images'] >= \
-                        self.NIMAGES_TRIGGER_AUTO_PROC):
-                    self.trigger_auto_processing("after", self.current_dc_parameters, 0)
-            except Exception as ex:
-                logging.getLogger("HWR").error("[COLLECT] Error creating XDS files, %s" % ex)
+        # we store the first and the last images, TODO: every 45 degree
+        logging.getLogger("HWR").info("Storing images in lims, frame number: 1")
+        try:
+            self.store_image_in_lims(1)
+            self.generate_and_copy_thumbnails(self.current_dc_parameters['fileinfo']['filename'], 1)
+        except Exception as ex:
+            print ex
 
-            # we store the first and the last images, TODO: every 45 degree
-            logging.getLogger("HWR").info("Storing images in lims, frame number: 1")
+        last_frame = self.current_dc_parameters['oscillation_sequence'][0]['number_of_images']
+        if last_frame > 1:
+            logging.getLogger("HWR").info("Storing images in lims, frame number: %d" % last_frame)
             try:
-                self.store_image_in_lims(1)
-                self.generate_and_copy_thumbnails(self.current_dc_parameters['fileinfo']['filename'], 1)
+                self.store_image_in_lims(last_frame)
+                self.generate_and_copy_thumbnails(self.current_dc_parameters['fileinfo']['filename'], last_frame)
             except Exception as ex:
                 print ex
-
-            last_frame = self.current_dc_parameters['oscillation_sequence'][0]['number_of_images']
-            if last_frame > 1:
-                logging.getLogger("HWR").info("Storing images in lims, frame number: %d" % last_frame)
-                try:
-                    self.store_image_in_lims(last_frame)
-                    self.generate_and_copy_thumbnails(self.current_dc_parameters['fileinfo']['filename'], last_frame)
-                except Exception as ex:
-                    print ex
 
         if self.datacatalog_enabled:
             self.store_datacollection_datacatalog()
@@ -741,7 +706,7 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             if motor_position_id:
                 lims_image['motorPositionId'] = motor_position_id
             logging.getLogger("HWR").info("LIMS IMAGE: %s, %s, %s, %s" % (
-                jpeg_filename, thumb_filename, jpeg_full_path, jpeg_thumbnail_full_path))
+            jpeg_filename, thumb_filename, jpeg_full_path, jpeg_thumbnail_full_path))
             try:
                 image_id = self.lims_client_hwobj.store_image(lims_image)
             except Exception as ex:
@@ -801,27 +766,11 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         """
         Descript. :
         """
-        # todo
-        fast_dp_dir = os.path.join(params_dict["auto_dir"], "fast_dp")
         biomax_pipeline_dir = os.path.join(params_dict["auto_dir"], "biomax_pipeline")
-        # autoPROC_dir = os.path.join(params_dict["auto_dir"],"autoPROC")
-
-        self.create_directories(fast_dp_dir)  # , biomax_pipeline_dir)#, autoPROC_dir)
 
         logging.getLogger("HWR").info("[COLLECT] triggering auto processing, parameters: %s" % params_dict)
         logging.getLogger("HWR").info(
             "[COLLECT] triggering auto processing, self.current_dc_parameters: %s" % self.current_dc_parameters)
-
-        logging.getLogger("HWR").info("[COLLECT] Launching fast_dp")
-        os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/fast_dp.sh %s &" \
-                  % (fast_dp_dir, params_dict['fileinfo']['filename']))
-
-        # logging.getLogger("HWR").info("[COLLECT] Launching biomax_pipeline")
-        # os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/biomax_pipeline.sh %s &" \
-        #    % (biomax_pipeline_dir, params_dict['fileinfo']['filename']))
-        # os.system("cd %s;/mxn/groups/biomax/wmxsoft/scripts_mxcube/autoPROC.sh %s &"  \
-        #    % (autoPROC_dir, params_dict['fileinfo']['filename']))
-        # return
 
         logging.getLogger("HWR").info("[COLLECT] Launching MAXIV Autoprocessing")
         if self.autoprocessing_hwobj is not None:
@@ -946,12 +895,15 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         self.move_detector(new_distance)
 
     def set_energy(self, value):
-        logging.getLogger("HWR").info("[COLLECT] Setting beamline energy")
-        self.energy_hwobj.startMoveEnergy(value)  # keV
+        logging.getLogger("HWR").info("[COLLECT] NOT Setting beamline energy to %s" % value)
+        # self.energy_hwobj.startMoveEnergy(value) # keV
+        logging.getLogger("HWR").info("[COLLECT] Updating wavelength parameter to %s" % (12.3984 / value))
+        self.current_dc_parameters["wavelength"] = (12.3984 / value)
         logging.getLogger("HWR").info("[COLLECT] Setting detector energy")
         self.detector_hwobj.set_photon_energy(value * 1000)  # ev
 
     def set_wavelength(self, value):
+        logging.getLogger("HWR").info("[COLLECT] Setting beamline wavelength to %s" % value)
         self.energy_hwobj.startMoveWavelength(value)
         current_energy = self.energy_hwobj.getCurrentEnergy()
         self.detector_hwobj.set_photon_energy(current_energy * 1000)
@@ -962,10 +914,6 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         Descript. :
         """
         self.diffractometer_hwobj.move_sync_motors(motor_position_dict)
-
-    def create_snapshot_directory(self):
-        self.snapshot_dir = os.path.join(self.current_dc_parameters["fileinfo"]["directory"], "timed_snapshots")
-        self.create_directories(self.snapshot_dir)
 
     def create_file_directories(self):
         """
@@ -1064,10 +1012,7 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
 
         oscillation_parameters = self.current_dc_parameters["oscillation_sequence"][0]
         osc_start, trigger_num, nframes_per_trigger, osc_range = self.triggers_to_collect[0]
-        if self.current_dc_parameters['experiment_type'] == 'Mesh':
-            ntrigger = self.get_mesh_num_lines()
-        else:
-            ntrigger = len(self.triggers_to_collect)
+        ntrigger = len(self.triggers_to_collect)
         config = self.detector_hwobj.col_config
         """ move after setting energy
         if roi == "4M":
@@ -1113,54 +1058,16 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
 
         # os.path.join(file_parameters["directory"], image_file_template)
         config['FilenamePattern'] = re.sub("^/data", "", name_pattern)  # remove "/data in the beginning"
-
-        if self.current_dc_parameters['experiment_type'] == 'Mesh':
-            # enable stream interface
-            # appendix with grid name, collection id
-            self.detector_hwobj.enable_stream()
-            img_appendix = {'exp_type': "mesh",
-                            'col_id': self.current_dc_parameters["collection_id"],
-                            'shape_id': self.get_current_shape_id()}
-            self.detector_hwobj.set_image_appendix(json.dumps(img_appendix))
-
-        if self.current_dc_parameters['experiment_type'] == 'Mesh':
-            self.start_spot_finder(oscillation_parameters['exposure_time'], file_parameters["directory"],
-                                   image_file_template)
-
         return self.detector_hwobj.prepare_acquisition(config)
-
-    def start_spot_finder(self, exp_time, path, prefix="mesh"):
-        """
-        Launch ZMQ client and spot finding on the HPC
-        """
-        self.stop_spot_finder()
-        os.system("python /mxn/groups/biomax/wmxsoft/scripts_mxcube/spot_finder/start_spot_finder.py \
-                    -t %s -d %s -p %s -H clu0-fe-0 &" % (exp_time, path, prefix))
-        logging.getLogger("HWR").info("starting spot finder on the HPC...... python /mxn/groups/biomax/wmxsoft/scripts_mxcube/spot_finder/start_spot_finder.py \
-                    -t %s -d %s -p %s -H clu0-fe-0 &" % (exp_time, path, prefix))
-
-        return
-
-    def stop_spot_finder(self):
-        """
-        Stop ZMQ client and spot finding server on the HPC
-        """
-        os.system("/mxn/groups/biomax/wmxsoft/scripts_mxcube/spot_finder/cancel_spot_finder.sh")
-        return
 
     def stop_collect(self, owner):
         """
         Stops data collection
         """
         logging.getLogger("HWR").error("Stopping collection ....")
-        self.diffractometer_hwobj.abort()
         self.detector_hwobj.cancel()
         self.detector_hwobj.disarm()
-        if self.current_dc_parameters['experiment_type'] == 'Mesh':
-            # disable stream interface
-            # stop spot finding
-            self.detector_hwobj.disable_stream()
-            self.stop_spot_finder()
+        self.diffractometer_hwobj.abort()
         if self.data_collect_task is not None:
             self.data_collect_task.kill(block=False)
         logging.getLogger("HWR").error("Collection stopped")
@@ -1181,12 +1088,17 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
         except Exception as ex:
             raise Exception('cannot set transmission', ex)
 
+    '''
     def get_undulators_gaps(self):
         """
         Descript. :
         """
-        # todo
-        return None
+	try:
+	    chan = self.getChannelObject('undulator_gap')
+            return chan.getValue()
+	except:
+	    return None
+    '''
 
     def get_slit_gaps(self):
         """
@@ -1240,7 +1152,7 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             self.diffractometer_hwobj.set_phase("Transfer", wait=False)
             if self.safety_shutter_hwobj is not None and self.safety_shutter_hwobj.getShutterState() == 'opened':
                 self.close_safety_shutter()
-        self.move_detector(800)
+            self.move_detector(800)
 
     def _update_image_to_display(self):
         fname1 = "/mxn/groups/biomax/wmxsoft/auto_load_img_cc/to_display"
@@ -1259,9 +1171,9 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
                 os.system("echo %s, %s > %s" % (self.display["file_name2"], i, fname2))
             except Exception as ex:
                 print ex
-                if self.stop_display:
-                    break
-                time.sleep(frequency)
+            if self.stop_display:
+                break
+            time.sleep(frequency)
 
     def enable_datacatalog(self, enable):
         self.datacatalog_enabled = enable
@@ -1292,17 +1204,37 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             except Exception as ex:
                 logging.getLogger("HWR").error(
                     "[HWR] Error sending collection started info to the data catalog: %s %s" % (
-                        self.datacatalog_url, ex))
+                    self.datacatalog_url, ex))
         else:
             logging.getLogger("HWR").error(
-                "[HWR] Error sending collection started info to the data catalog: No datacatalog URL specified")
+                "[HWR] Error sending collection startedinfo to the data catalog: No datacatalog URL specified")
 
     def store_datacollection_datacatalog(self):
         """
         Send the data collection parameters to the data catalog. In the form:
+            msg = {
+                'uuid': 'f5ed1b14-3e70-43ce-b561-8902e5e31422',
+                'proposal': '20170251',
+                'beamline': 'AnyMAX',
+                'directory': '/data/visitors/anybeam/20170251/path/to/file/',
+
+                'files': [
+                'datafile_00001.h5',
+                'datafile_00002.h5',
+                'datafile_00003.h5',
+                'datafile_master.h5',
+                ],
+
+               # Free form, whatever is relevant to the experiment
+               'scientific': {
+                   'some_energy': '4.2 eV',
+                   'some_distance': '42 um',
+                   'some_time': '300 ms',
+                },
+            }
         """
         msg = {}
-        # files = []
+        files = []
         collection = self.current_dc_parameters
         proposal_code = self.session_hwobj.proposal_code
         proposal_number = self.session_hwobj.proposal_number
@@ -1334,9 +1266,8 @@ class BIOMAXCollect(AbstractCollect, HardwareObject):
             num_files = int(math.ceil(collection['oscillation_sequence'][0]['number_of_images'] / 100.0))
         except Exception as ex:
             logging.getLogger("HWR").error("[HWR] Error during data catalog: %s" % ex)
-            num_files = -1
 
-        collection['fileinfo']['num_files'] = num_files  # num_images per files
+        collection['fileinfo']['num_files'] = num_files
         proxies = {
             "http": None,
             "https": None
